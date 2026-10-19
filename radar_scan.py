@@ -165,6 +165,8 @@ def harvest_zuiquan(c):
             continue
         host = re.sub(r'^www\.', '', host)
         dl = (name + ' ' + desc).lower()
+        if CJK.search(name + ' ' + desc):
+            continue  # китайские станции — skip
         prio = 2
         if any(k in dl for k in ('免费', 'free', '试用', '赠送', '白嫖', '0元')): prio = 1
         if enqueue(c, host, prio, 'zuiquan:' + name[:30]): n += 1
@@ -200,7 +202,7 @@ def harvest_github(c):
                     except Exception:
                         continue
                     host = re.sub(r'^www\.', '', host)
-                    if enqueue(c, host, 2, 'github:' + str(it.get('full_name', ''))[:40]): n += 1
+                    if enqueue(c, host, 3, 'github:' + str(it.get('full_name', ''))[:40]): n += 1
             time.sleep(4)
         except Exception as e:
             print('gh err', str(e)[:60])
@@ -241,6 +243,47 @@ AUTH_MARKERS = [
     ('captcha_run', r'captcha\.run'),
 ]
 FREEBIE_SIG = re.compile(r'(free credit[s]?|free tier|free trial|welcome bonus|sign[- ]?up bonus|daily (?:free|check[- ]?in)|赠送|免费|试用额度)', re.I)
+CJK = re.compile(r'[\u4e00-\u9fff]')
+
+def autoreg_verdict(info):
+    """Вердикт: можно ли авторег и как. Возвращает строку для карточки."""
+    p = info.get('panel') or {}
+    reg_open = p.get('reg') in (True, 'true', 1)
+    keyless = info.get('keyless_api')
+    reg = info.get('reg', '')
+    caps = info.get('signup_markers', [])
+    if keyless and info.get('open_chat'):
+        return '✅ АВТОРЕГ НЕ НУЖЕН — API открыт без ключа, юзай сразу'
+    if reg_open and not p.get('turnstile'):
+        v = '✅ АВТОРЕГ ДА — email+pass без капчи'
+        if p.get('github_oauth'): v += ' + GH-pool'
+        q = str(p.get('quota') or '')
+        try:
+            if q and float(q) > 0: v += ' + бонус $' + ('%.2f' % (float(q) / 500000)).rstrip('0').rstrip('.')
+        except Exception: pass
+        return v
+    if reg_open and p.get('turnstile'):
+        v = '✅ АВТОРЕГ ДА — turnstile решает sidecar :8877'
+        if p.get('github_oauth'): v += ', или GH OAuth (пул 1962 акка)'
+        if p.get('telegram_oauth'): v += ', TG-oauth (пул сессий)'
+        return v
+    if 'NO-CAPTCHA signup' in reg:
+        stack = [x for x in caps if x in ('clerk', 'supabase', 'workos', 'firebase', 'stack', 'kinde', 'auth0', 'nextauth')]
+        if stack:
+            return '✅ АВТОРЕГ ДА — ' + stack[0] + ' протокол (есть готовые реги), email без капчи'
+        if 'oauth_github' in caps:
+            return '✅ АВТОРЕГ ДА — GH OAuth (пул 1962 акка), без капчи'
+        return '🟡 АВТОРЕГ ВЕРОЯТНО — signup без капчи, надо реверсить форму (Next.js/server actions)'
+    if 'captcha-solvable' in reg:
+        cc = 'turnstile' if 'turnstile' in reg else ('recaptcha' if 'recaptcha' in reg else 'altcha')
+        return '🟡 АВТОРЕГ МОЖНО — ' + cc + ' решаем (sidecar/2captcha), email-рега'
+    if 'hard-captcha' in reg:
+        return '❌ АВТОРЕГ НЕТ — hcaptcha/captcha.run (не решаем нашим стеком)'
+    if p and not reg_open:
+        return '❌ АВТОРЕГ НЕТ — рега закрыта (invite/ждём открытия)'
+    if keyless:
+        return '🟡 API keyless на /v1/models, chat может требовать ключ — проверить'
+    return '❓ нет signup/API — ручной разбор'
 
 def deep_probe(dom):
     """Возвращает (score, info). Фокус: бесплатный доступ к AI по API."""
@@ -259,6 +302,8 @@ def deep_probe(dom):
     dm = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']{10,200})', body, re.I) \
          or re.search(r'<meta[^>]+content=["\']([^"\']{10,200})["\'][^>]+name=["\']description', body, re.I)
     info['desc'] = htmlmod.unescape(dm.group(1)).strip()[:150] if dm else ''
+    if len(CJK.findall(info.get('title', '') + ' ' + info.get('desc', ''))) >= 3:
+        return -1, {'cjk': True, 'title': info.get('title', '')[:50]}
     fb = FREEBIE_SIG.findall(body)
     if fb: info['freebie'] = list(dict.fromkeys([x.lower() for x in fb]))[:4]
     low = body.lower()
@@ -384,6 +429,7 @@ def tg_notify(text):
 
 def card(dom, score, info, src):
     L = ['🎯 ' + dom + '  [' + str(score) + ']  via ' + src]
+    L.append(autoreg_verdict(info))
     if info.get('title') or info.get('desc'):
         L.append('📋 ' + (info.get('title') or '') + (' — ' + info['desc'] if info.get('desc') else ''))
     p = info.get('panel')
@@ -473,7 +519,8 @@ def main():
         if score >= 30:
             c.execute('INSERT INTO findings(ts,domain,score,info,src_chan,src_mid) VALUES(?,?,?,?,?,?)',
                       (int(time.time()), dom, score, json.dumps(info, ensure_ascii=False)[:1400], src, 0))
-            if dom not in already:
+            verd = autoreg_verdict(info)
+            if dom not in already and verd[:1] in ('✅', '🟡'):
                 alerts.append((score, dom, info, src))
                 already.add(dom)
         print(' probe', dom, '->', score, (info.get('reg') or info.get('keyless_api') or ''), str(info.get('title') or '')[:40])
