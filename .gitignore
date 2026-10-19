@@ -6,3 +6,4 @@ radar.db
 *.log
 __pycache__/
 atlas_abuse_seeds.json
+gh_token
