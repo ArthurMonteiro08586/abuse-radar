@@ -41,7 +41,8 @@ def enqueue_r(c, dom, prio, src, tries=6):
 
 # ---------- reddit ----------
 REDDIT_SUBS = ['LocalLLaMA', 'OpenAI', 'ChatGPTCoding', 'ClaudeAI', 'singularity',
-               'ArtificialInteligence', 'freebies', 'slavelabour', 'aifreemium']
+               'ArtificialInteligence', 'freebies', 'slavelabour', 'aifreemium',
+               'SideProject', 'AlphaandBetaUsers', 'InternetIsBeautiful', 'startups', 'SaaS']
 
 def harvest_reddit(c):
     n = 0
@@ -160,17 +161,121 @@ def commit_r(c, tries=6):
         except sqlite3.OperationalError:
             time.sleep(3 + i * 3)
 
+# ---------- HN Show (мелкие стартапы, algolia API) ----------
+HN_QUERIES = ['ai api', 'llm api', 'chatgpt alternative', 'openai compatible', 'claude api',
+              'free credits ai', 'ai agent', 'gpt wrapper', 'ai tool', 'inference api']
+
+def harvest_hn(c):
+    import urllib.parse as up
+    n = 0
+    month_ago = int(time.time()) - 86400 * 30
+    seen_titles = set()
+    for q in HN_QUERIES:
+        u = ('https://hn.algolia.com/api/v1/search_by_date?query=' + up.quote(q)
+             + '&tags=show_hn&hitsPerPage=30&numericFilters=points>2,created_at_i>' + str(month_ago))
+        st, b, _ = http(u, timeout=15, headers=UA)
+        if st != 200 or not b:
+            continue
+        try:
+            data = json.loads(b)
+        except Exception:
+            continue
+        for h in data.get('hits', []):
+            url = h.get('url')
+            title = h.get('title') or ''
+            if not url or title in seen_titles:
+                continue
+            seen_titles.add(title)
+            try:
+                hh = ok_host(up.urlparse(url).netloc)
+            except Exception:
+                continue
+            if not hh:
+                continue
+            prio = 1 if re.search(r'free|trial|credits|api|openai|llm|gpt|claude', title, re.I) else 2
+            if enqueue_r(c, hh, prio, 'showhn'):
+                n += 1
+        time.sleep(0.6)
+    commit_r(c)
+    return n
+
+# ---------- BetaList (Atom: 25 свежих стартапов) ----------
+def harvest_betalist(c):
+    import urllib.parse as up
+    st, b, _ = http('https://feeds.feedburner.com/BetaList', timeout=15, headers=UA)
+    if st != 200 or not b:
+        return 0
+    entries = re.findall(r'<entry>(.*?)</entry>', b, re.S)
+    n = 0
+    for e in entries[:12]:
+        t = re.search(r'<title[^>]*>(.*?)</title>', e, re.S)
+        l = re.search(r'<link[^>]*href="([^"]+)"', e)
+        title = t.group(1) if t else ''
+        page = l.group(1).split('?')[0] if l else ''
+        if not page or CJK.search(title):
+            continue
+        # вторая выборка: страница стартапа -> внешняя ссылка
+        ps, pb, _ = http(page, timeout=12, headers=UA)
+        if ps != 200 or not pb:
+            continue
+        cand = re.findall(r'href="(https?://(?!betalist|feedburner|google|twitter|x\.com|facebook|linkedin|instagram)[^"]+)"', pb)
+        for u in cand[:4]:
+            try:
+                hh = ok_host(up.urlparse(u).netloc)
+            except Exception:
+                continue
+            if hh and enqueue_r(c, hh, 1, 'betalist'):
+                n += 1
+                break
+        time.sleep(0.8)
+    commit_r(c)
+    return n
+
+# ---------- BetaBound (RSS: beta-тесты = бесплатный доступ) ----------
+def harvest_betabound(c):
+    import urllib.parse as up
+    st, b, _ = http('https://betabound.com/feed/', timeout=15, headers=UA)
+    if st != 200 or not b:
+        return 0
+    items = re.findall(r'<item>(.*?)</item>', b, re.S)
+    n = 0
+    for it in items[:10]:
+        l = re.search(r'<link>(.*?)</link>', it, re.S)
+        page = l.group(1).strip() if l else ''
+        if not page:
+            continue
+        ps, pb, _ = http(page, timeout=12, headers=UA)
+        if ps != 200 or not pb:
+            continue
+        cand = re.findall(r'href="(https?://(?!betabound|wordpress|wp\.com|gravatar|google|twitter|x\.com|facebook)[^"]+)"', pb)
+        # беру первый внешний не-соц ссылку = сайт продукта
+        for u in cand[:6]:
+            try:
+                hh = ok_host(up.urlparse(u).netloc)
+            except Exception:
+                continue
+            if hh and enqueue_r(c, hh, 1, 'betabound'):
+                n += 1
+                break
+        time.sleep(0.8)
+    commit_r(c)
+    return n
+
 def main():
     c = db()
     before = c.execute('SELECT COUNT(*) FROM queue WHERE done=0').fetchone()[0]
     nr = harvest_reddit(c)
     np_ = harvest_pepper(c)
     npa = harvest_pastes(c)
+    nhn = harvest_hn(c)
+    nbl = harvest_betalist(c)
+    nbb = harvest_betabound(c)
     commit_r(c)
     after = c.execute('SELECT COUNT(*) FROM queue WHERE done=0').fetchone()[0]
-    total = nr + np_ + npa
+    total = nr + np_ + npa + nhn + nbl + nbb
     if total > 0:
-        print('EXTRA-SOURCES: +%d (reddit %d, pepper %d, pastes %d) | queue %d->%d' % (total, nr, np_, npa, before, after))
+        print('EXTRA-SOURCES: +%d (reddit %d, pepper %d, pastes %d, showhn %d, betalist %d, betabound %d) | queue %d->%d'
+              % (total, nr, np_, npa, nhn, nbl, nbb, before, after))
     # пусто = cron ничего не шлёт
 
 if __name__ == '__main__':
