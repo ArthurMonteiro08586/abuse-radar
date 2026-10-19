@@ -182,7 +182,9 @@ def harvest_github(c):
     GH = {'Authorization': '***' + tok, 'Accept': 'application/vnd.github+json',
           'User-Agent': 'abuse-radar', 'X-GitHub-Api-Version': '2022-11-28'}
     queries = ['free ai api', 'llm api gateway free', 'new-api', 'chatgpt free api',
-               'awesome free ai', 'reverse api']
+               'awesome free ai', 'reverse api', 'chat2api', 'ai gateway openai compatible',
+               'free gpt api key', 'llm proxy free', 'topic:ai-api', 'topic:llm',
+               'claude api free', 'gemini api free', 'uncensored llm api']
     n = 0
     for q in queries:
         try:
@@ -207,6 +209,45 @@ def harvest_github(c):
         except Exception as e:
             print('gh err', str(e)[:60])
     print('github enqueued:', n)
+    return n
+
+# ---------- forum_parser findings (4000+, локальный) ----------
+def harvest_forumfind(c):
+    p = r'C:/Users/User/tmp/forum_parser/output/findings.jsonl'
+    n = 0
+    try:
+        f = open(p, encoding='utf-8', errors='replace')
+    except FileNotFoundError:
+        print('forumfind: no file'); return 0
+    kw = re.compile(r'(api|ключ|key|free|бесплат|gpt|claude|llm|нейросет|ai)', re.I)
+    for line in f:
+        try: j = json.loads(line)
+        except Exception: continue
+        blob = (str(j.get('title', '')) + ' ' + str(j.get('description', '')) + ' ' + str(j.get('url', '')))
+        if not kw.search(blob): continue
+        for u in re.findall(r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s"<>]*', blob)[:5]:
+            try: host = urllib.parse.urlparse(u).netloc.lower()
+            except Exception: continue
+            host = re.sub(r'^www\.', '', host)
+            if enqueue(c, host, 2, 'forum'): n += 1
+    print('forumfind enqueued:', n)
+    return n
+
+# ---------- free-for.dev (AI/ML секции) ----------
+def harvest_freefordev(c):
+    st, body, _ = http('https://raw.githubusercontent.com/ripienaar/free-for-dev/master/README.md', timeout=25)
+    if st != 200 or len(body) < 10000:
+        print('freefordev fail', st); return 0
+    n = 0
+    for s in re.split(r'\n#', body):
+        head = s[:220].lower()
+        if not any(k in head for k in ('machine learning', 'ai ', 'llm', 'gpt', 'artificial')): continue
+        for u in re.findall(r'\((https?://[^)\s]+)\)', s):
+            try: host = urllib.parse.urlparse(u).netloc.lower()
+            except Exception: continue
+            host = re.sub(r'^www\.', '', host)
+            if enqueue(c, host, 1, 'freefordev'): n += 1
+    print('freefordev enqueued:', n)
     return n
 
 # ---------- URL extraction ----------
@@ -244,6 +285,41 @@ AUTH_MARKERS = [
 ]
 FREEBIE_SIG = re.compile(r'(free credit[s]?|free tier|free trial|welcome bonus|sign[- ]?up bonus|daily (?:free|check[- ]?in)|赠送|免费|试用额度)', re.I)
 CJK = re.compile(r'[\u4e00-\u9fff]')
+FAMS = [('Claude', r'claude|opus|sonnet|haiku|fable'), ('GPT', r'\bgpt|openai|o1-|o3-|o4-|chatgpt|luna|terra|astra|sol'),
+        ('Gemini', r'gemini|palm'), ('Grok', r'grok'), ('DeepSeek', r'deepseek|\bds-|dsv'), ('Qwen', r'qwen'),
+        ('Llama', r'llama'), ('Mistral', r'mistral|mixtral|codestral'), ('GLM', r'\bglm|zhipu|chatglm'),
+        ('Kimi', r'kimi|moonshot'), ('MiniMax', r'minimax|abab'), ('Midjourney', r'midjourney|\bmj\b'),
+        ('Suno/музыка', r'suno|udio|music'), ('Flux/картинки', r'flux|dall|imagen|sd3|stable-diffusion|cogview|nano-banana'),
+        ('Видео', r'video|kling|runway|sora|wan2|hailuo|veo'), ('Cursor/Copilot', r'cursor|copilot|codex')]
+UNCEN = re.compile(r'abliterat|uncensor|noalign|nsfw|no-?refus|unfilter', re.I)
+
+def classify_models(ids):
+    """Сводка по списку моделей: семейства + uncensored."""
+    ids = [str(i) for i in ids if i]
+    fams = []
+    for fname, pat in FAMS:
+        hits = [i for i in ids if re.search(pat, i, re.I)]
+        if hits: fams.append(fname + ' x' + str(len(hits)))
+    uncen = [i for i in ids if UNCEN.search(i)]
+    s = ', '.join(fams[:8]) if fams else ('нет/не спарсились' if not ids else 'кастом x' + str(len(ids)))
+    if uncen: s += ' | UNCENSORED x' + str(len(uncen)) + ': ' + ', '.join(uncen[:3])
+    return s
+
+def access_verdict(info):
+    """Как получать доступ: API сразу / авторег→ключ / реверс фронта."""
+    if info.get('open_chat'):
+        return '⚡ API СРАЗУ — открытый chat completions без ключа'
+    if info.get('keyless_api'):
+        return '⚡ API почти сразу — models без ключа, chat проверить (возможен free-ключ после рега)'
+    p = info.get('panel') or {}
+    if p.get('reg') in (True, 'true', 1):
+        return '🔑 АВТОРЕГ → КЛЮЧ — new-api панель: рега (email/GH/TG) → /api/token → OpenAI-compat ключ'
+    rev = info.get('reverse')
+    if rev:
+        return '🔧 РЕВЕРС — ' + rev + ': скрытый API фронта, перехватывать запросы (как refuseless)'
+    if info.get('signup'):
+        return '🔑 РЕГ → КЛЮЧ — signup есть, после рега искать dashboard/api-keys'
+    return '🔍 неясно — нужен ручной разбор'
 
 def autoreg_verdict(info):
     """Вердикт: можно ли авторег и как. Возвращает строку для карточки."""
@@ -304,6 +380,13 @@ def deep_probe(dom):
     info['desc'] = htmlmod.unescape(dm.group(1)).strip()[:150] if dm else ''
     if len(CJK.findall(info.get('title', '') + ' ' + info.get('desc', ''))) >= 3:
         return -1, {'cjk': True, 'title': info.get('title', '')[:50]}
+    # reverse-маркеры фронта
+    if '__NEXT_DATA__' in body or '/_next/' in body:
+        info['reverse'] = 'Next.js (server actions/RSC — перехват POST форм)'
+    elif '__NUXT__' in body:
+        info['reverse'] = 'Nuxt (vue SSR)'
+    elif re.search(r'window\.__APP|data-reactroot|id="root"></div>\s*<script', body):
+        info['reverse'] = 'React/Vue SPA (API в бандле js)'
     fb = FREEBIE_SIG.findall(body)
     if fb: info['freebie'] = list(dict.fromkeys([x.lower() for x in fb]))[:4]
     low = body.lower()
@@ -342,18 +425,27 @@ def deep_probe(dom):
                 pj = json.loads(pb)
                 plist = pj.get('data', [])
                 if isinstance(plist, list) and plist:
+                    allnames = [m.get('model_name') for m in plist if isinstance(m, dict) and m.get('model_name')]
                     free = [m.get('model_name') for m in plist
                             if isinstance(m, dict) and m.get('model_ratio') in (0, 0.0, None) and m.get('model_price') in (0, 0.0, None) and m.get('model_name')]
                     info['models_total'] = len(plist)
+                    if not info.get('models_class'):
+                        info['models_class'] = classify_models(allnames)
                     if free:
                         info['free_models'] = free[:12]
+                        info['free_n'] = len(free)
                         score += 30 + min(len(free), 10)
             except Exception: pass
-    # 2) keyless /v1/models
+    # 2) keyless /v1/models (+ api-поддомен)
+    FAKE_KEY = 'Bear' + 'er sk-radar-probe'
     keyless = False
-    for api in ('/v1/models', '/api/v1/models'):
-        for hdr in ({'Authorization': '***'}, {}):
-            ms, mb, _ = http(base + api, timeout=12, headers=hdr)
+    api_base = base
+    cands = [(base + '/v1/models', ''), (base + '/api/v1/models', '')]
+    if not dom.startswith(('api.', 'open.')):
+        cands.append(('https://api.' + dom + '/v1/models', 'api.' + dom))
+    for murl, sub in cands:
+        for hdr in ({'Authorization': FAKE_KEY}, {}):
+            ms, mb, _ = http(murl, timeout=12, headers=hdr)
             if ms == 200 and ('"data"' in mb[:3000] or mb.strip().startswith('[')):
                 ids = []
                 try:
@@ -363,10 +455,13 @@ def deep_probe(dom):
                 except Exception:
                     pass
                 keyless = True
-                info['keyless_api'] = api
+                info['keyless_api'] = murl
+                if sub: info['api_sub'] = sub
                 info['models'] = ids[:15]
                 info['models_n'] = len(ids)
+                info['models_class'] = classify_models(ids)
                 score += 60
+                api_base = murl.rsplit('/v1/', 1)[0] if '/v1/' in murl else murl.rsplit('/api/', 1)[0]
                 break
         if keyless: break
     # 3) open chat без ключа
@@ -374,8 +469,9 @@ def deep_probe(dom):
         try:
             payload = json.dumps({'model': info['models'][0],
                                   'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 1}).encode()
-            cs, cb, _ = http(base + info['keyless_api'].replace('/models', '/chat/completions'), timeout=20,
-                             data=payload, headers={'Content-Type': 'application/json'})
+            chat_url = info['keyless_api'].replace('/models', '/chat/completions')
+            cs, cb, _ = http(chat_url, timeout=20,
+                             data=payload, headers={'Content-Type': 'application/json', 'Authorization': FAKE_KEY})
             if cs == 200 and ('choices' in cb or 'content' in cb):
                 score += 15; info['open_chat'] = True
         except Exception: pass
@@ -430,9 +526,29 @@ def tg_notify(text):
 def card(dom, score, info, src):
     L = ['🎯 ' + dom + '  [' + str(score) + ']  via ' + src]
     L.append(autoreg_verdict(info))
+    L.append(access_verdict(info))
     if info.get('title') or info.get('desc'):
         L.append('📋 ' + (info.get('title') or '') + (' — ' + info['desc'] if info.get('desc') else ''))
-    p = info.get('panel')
+    # модели
+    if info.get('models_class'):
+        mn = info.get('models_total') or info.get('models_n')
+        L.append('🧠 модели' + (' (' + str(mn) + '): ' if mn else ': ') + info['models_class'])
+        if info.get('free_n'):
+            L.append('🆓 free x' + str(info['free_n']) + ': ' + ', '.join(info['free_models'][:6]))
+    # смысл/ценность
+    val = []
+    p = info.get('panel') or {}
+    q = str(p.get('quota') or '')
+    try:
+        if q and float(q) > 0: val.append('бонус новичку $' + ('%.2f' % (float(q) / 500000)).rstrip('0').rstrip('.'))
+    except Exception: pass
+    if info.get('free_n'): val.append(str(info['free_n']) + ' бесплатных моделей')
+    if info.get('open_chat'): val.append('chat БЕЗ ключа')
+    if info.get('keyless_api'): val.append('OpenAI-compat API')
+    if p.get('epay'): val.append('USDT-оплата')
+    if info.get('freebie'): val.append('/'.join(info['freebie'][:2]))
+    if val: L.append('💎 смысл: ' + ', '.join(val))
+    if info.get('reverse'): L.append('🔧 реверс: ' + info['reverse'])
     if p:
         L.append('🔧 new-api: ' + str(p.get('sys') or '?') + ' v' + str(p.get('ver') or '?') +
                  ' | reg:' + ('OPEN' if p.get('reg') in (True, 'true', 1) else 'closed') +
@@ -467,6 +583,13 @@ def main():
     try: harvest_zuiquan(c)
     except Exception as e: print('zuiquan err', str(e)[:80])
     c.commit()
+    try: harvest_freefordev(c)
+    except Exception as e: print('freefordev err', str(e)[:80])
+    c.commit()
+    if random.random() < 0.15 or full:
+        try: harvest_forumfind(c)
+        except Exception as e: print('forumfind err', str(e)[:80])
+        c.commit()
     if full or random.random() < 0.3:
         try: harvest_github(c)
         except Exception as e: print('github err', str(e)[:80])
