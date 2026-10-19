@@ -67,6 +67,7 @@ def enqueue(c, dom, prio, src):
     dom = (dom or '').strip().lower()
     if not dom or dom in SKIP_DOMAINS or any(dom.endswith('.' + s) for s in SKIP_DOMAINS): return False
     if re.match(r'^\d+\.\d+\.\d+\.\d+$', dom): return False
+    if dom.endswith(('.edu', '.gov', '.mil', '.int')) or '.edu.' in dom or '.gov.' in dom: return False
     if len(dom) > 90 or not re.match(r'^[a-z0-9.-]+$', dom): return False
     if c.execute('SELECT domain FROM domains WHERE domain=?', (dom,)).fetchone(): return False
     c.execute('INSERT OR IGNORE INTO queue(domain,prio,src,added) VALUES(?,?,?,?)', (dom, prio, src, int(time.time())))
@@ -285,6 +286,12 @@ AUTH_MARKERS = [
 ]
 FREEBIE_SIG = re.compile(r'(free credit[s]?|free tier|free trial|welcome bonus|sign[- ]?up bonus|daily (?:free|check[- ]?in)|赠送|免费|试用额度)', re.I)
 CJK = re.compile(r'[\u4e00-\u9fff]')
+IDE_MARKERS = [('Cursor', r'\bcursor\b'), ('Cline', r'\bcline\b'), ('Windsurf', r'windsurf'),
+               ('VSCode-ext', r'vscode|vs code extension|visual studio code'), ('Continue', r'continue\.dev|\bcontinue\b'),
+               ('RooCode', r'roo code|roo-code|roocode'), ('OpenCode', r'opencode'), ('Codex', r'\bcodex\b'),
+               ('Zed', r'\bzed\b'), ('Aider', r'\baider\b'), ('CLI', r'\bcli\b|npm i(nstall)? [a-z]|pip install'),
+               ('JetBrains', r'jetbrains|pycharm|intellij|goland'), ('Claude Code', r'claude code|claude-code'),
+               ('IDE', r'\bide\b')]
 FAMS = [('Claude', r'claude|opus|sonnet|haiku|fable'), ('GPT', r'\bgpt|openai|o1-|o3-|o4-|chatgpt|luna|terra|astra|sol'),
         ('Gemini', r'gemini|palm'), ('Grok', r'grok'), ('DeepSeek', r'deepseek|\bds-|dsv'), ('Qwen', r'qwen'),
         ('Llama', r'llama'), ('Mistral', r'mistral|mixtral|codestral'), ('GLM', r'\bglm|zhipu|chatglm'),
@@ -476,6 +483,8 @@ def deep_probe(dom):
                 score += 15; info['open_chat'] = True
         except Exception: pass
     # 4) signup-страница (если не панель)
+    reg_methods = []
+    caps = []
     if not panel:
         markers = [name for name, pat in AUTH_MARKERS if re.search(pat, body, re.I)]
         info['markers'] = markers[:8]
@@ -487,18 +496,58 @@ def deep_probe(dom):
                     info['signup'] = p
                     smk = list(set(markers + [name for name, pat in AUTH_MARKERS if re.search(pat, pb2, re.I)]))
                     info['signup_markers'] = smk[:10]
+                    if re.search(r'type=["\']?email|name=["\']?email|>email<|e-mail', pl): reg_methods.append('email')
+                    if 'oauth_github' in smk: reg_methods.append('GH-OAuth')
+                    if 'oauth_google' in smk: reg_methods.append('Google-OAuth')
                     caps = [x for x in ('turnstile', 'recaptcha', 'hcaptcha', 'altcha', 'captcha_run') if x in smk]
                     if not caps: score += 40; info['reg'] = 'NO-CAPTCHA signup'
                     elif set(caps) & {'turnstile', 'altcha', 'recaptcha'}: score += 25; info['reg'] = 'captcha-solvable signup (' + ','.join(caps) + ')'
                     else: score += 12; info['reg'] = 'hard-captcha signup (' + ','.join(caps) + ')'
-                    if 'oauth_github' in smk: score += 8; info['reg'] += ' +GH-oauth'
+                    if 'oauth_github' in smk: score += 8
                     if any(x in smk for x in ('clerk', 'supabase', 'workos', 'firebase', 'stack', 'kinde')): score += 12; info['reg'] += ' +known-stack'
                     break
-    # 5) docs
+    else:
+        p = info.get('panel') or {}
+        if p.get('password_login') in (True, 'true', 1, None): reg_methods.append('email')
+        if p.get('github_oauth'): reg_methods.append('GH-OAuth')
+        if p.get('telegram_oauth'): reg_methods.append('TG-OAuth')
+        if p.get('linuxdo_oauth'): reg_methods.append('LinuxDO-OAuth')
+        caps = ['turnstile'] if p.get('turnstile') else []
+    info['reg_methods'] = list(dict.fromkeys(reg_methods))
+    info['captcha'] = caps
+    # 5) docs + IDE/CLI + limits из docs
+    ide = set()
     for d in ('/docs', '/apidocs', '/api-docs', '/openapi.json'):
         ds, db2, _ = http(base + d, timeout=8)
         if ds == 200 and len(db2) > 800:
-            info['docs'] = d; score += 5; break
+            info['docs'] = d; score += 5
+            for nm, pat in IDE_MARKERS:
+                if re.search(pat, db2[:150000], re.I): ide.add(nm)
+            break
+    # 6) IDE/CLI маркеры на главной
+    for nm, pat in IDE_MARKERS:
+        if re.search(pat, body[:150000], re.I): ide.add(nm)
+    if ide: info['ide_cli'] = sorted(ide)[:8]
+    # 7) лимиты/триал из текста главной
+    lim = []
+    def _lim(s):
+        s = re.sub(r'\s+', ' ', s).strip()
+        s = re.split(r'["}{\\]', s)[0].strip(' -:;,')
+        if 6 < len(s) < 70: lim.append(s)
+    for m in re.finditer(r'\$?\d[\d,.]*\s*(?:usd)?\s*(?:free\s+)?(?:credits?|tokens?|requests?|messages?|words?|calls?)\b[^<\n]{0,40}', body, re.I):
+        _lim(m.group(0))
+    for m in re.finditer(r'\b\d[\d,.]*[kKmM]?\s*(?:requests?|tokens?|credits?|calls?|generations?)\s*(?:per|/)\s*(?:day|month|minute|hour|sec)\w*', body, re.I):
+        _lim(m.group(0))
+    for m in re.finditer(r'(free tier[^<.\n]{0,60}|free trial[^<.\n]{0,40}|daily (?:free|check-?in)[^<.\n]{0,40}|\d+\s*(?:free|кредитов|запросов)[^<.\n]{0,30})', body, re.I):
+        _lim(m.group(0))
+    if lim: info['limits'] = list(dict.fromkeys(lim))[:5]
+    # 8) AI-гейт: нет AI-сигналов и нет API/панели → мусор
+    AI_SIG = re.compile(r'\b(ai|a\.i\.|llm|gpt|claude|gemini|chatbot|chat bot|models?|inference|neural|machine learning|openai|anthropic|deepseek|qwen|llama|grok|midjourney|suno|diffusion|transformer)\b', re.I)
+    if not keyless and not panel and not info.get('ide_cli') \
+       and not AI_SIG.search(info.get('title', '') + ' ' + info.get('desc', '')) \
+       and not AI_SIG.search(body[:30000]):
+        info['noai'] = True
+        return 0, info
     if info.get('freebie'): score += 8
     return score, info
 
@@ -548,6 +597,27 @@ def card(dom, score, info, src):
     if p.get('epay'): val.append('USDT-оплата')
     if info.get('freebie'): val.append('/'.join(info['freebie'][:2]))
     if val: L.append('💎 смысл: ' + ', '.join(val))
+    # регистрация: методы + капча + почта
+    rm = info.get('reg_methods') or []
+    caps2 = info.get('captcha') or []
+    if rm or caps2 is not None:
+        regline = '📝 рег: ' + ('+'.join(rm) if rm else '?')
+        regline += ' | капча: ' + (','.join(caps2) if caps2 else 'НЕТ')
+        # почта
+        mail = ''
+        pv = str(p.get('email_verif') or '').lower()
+        if p:
+            mail = 'email+IMAP (верификация)' if pv in ('true', '1') else 'любая почта, без вериф'
+        elif info.get('signup'):
+            mail = 'email (signup ' + info['signup'] + ')'
+        if mail: regline += ' | почта: ' + mail
+        L.append(regline)
+    # лимиты/триал
+    if info.get('limits'):
+        L.append('📊 лимиты: ' + ' / '.join(info['limits'][:4]))
+    # IDE/CLI
+    if info.get('ide_cli'):
+        L.append('🖥 IDE/CLI: ' + ', '.join(info['ide_cli']))
     if info.get('reverse'): L.append('🔧 реверс: ' + info['reverse'])
     if p:
         L.append('🔧 new-api: ' + str(p.get('sys') or '?') + ' v' + str(p.get('ver') or '?') +
@@ -565,8 +635,9 @@ def card(dom, score, info, src):
         if info.get('models'): L.append('   ' + ', '.join(str(x) for x in info['models'][:10]))
     if info.get('free_models'):
         L.append('🆓 free-модели (' + str(info.get('models_total', '?')) + ' всего в прайсе): ' + ', '.join(info['free_models'][:8]))
-    if info.get('reg') and not p:
-        L.append('📝 рег: ' + info['reg'] + (' | ' + ','.join(info.get('signup_markers', [])[:5]) if info.get('signup_markers') else ''))
+    if info.get('signup_markers') and not p:
+        stack = [x for x in info['signup_markers'] if x in ('clerk', 'supabase', 'workos', 'firebase', 'stack', 'kinde', 'next_auth', 'authjs', 'firebase_auth')]
+        if stack: L.append('🧩 auth-стек: ' + ','.join(stack) + ' (есть готовые регеры)')
     if info.get('freebie'):
         L.append('🎁 freebie: ' + ', '.join(info['freebie'][:3]))
     if info.get('docs'): L.append('📄 docs: ' + info['docs'])
@@ -653,7 +724,7 @@ def main():
     fresh = sorted(alerts, key=lambda a: -a[0])[:9]
     for i in range(0, len(fresh), 3):
         batch = fresh[i:i + 3]
-        txt = '📡 ABUSE-RADAR v2 — ' + str(len(alerts)) + ' новых целей за ран\n\n'
+        txt = '📡 ABUSE-RADAR v3 — ' + str(len(alerts)) + ' новых целей за ран\n\n'
         txt += '\n\n'.join(card(dom, score, info, src) for score, dom, info, src in batch)
         if tg_notify(txt):
             for _, dom, _, _ in batch:
