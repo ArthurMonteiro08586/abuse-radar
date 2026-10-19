@@ -15,7 +15,10 @@ UA = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 AI_KW = re.compile(r'\b(ai|llm|gpt|chatgpt|claude|gemini|grok|deepseek|qwen|llama|openai|anthropic|cursor|copilot|midjourney|suno|api key|free tier|inference|model)\b', re.I)
 JUNK_HOSTS = ('reddit.com', 'redd.it', 'youtube.com', 'youtu.be', 'twitter.com', 'x.com', 'google.', 'bing.com',
               'wikipedia.org', 'github.com', 'githubusercontent', 'discord.gg', 'discord.com', 'medium.com',
-              'imgur.com', 'streamable.com', 'redditmedia', 'redditstatic', 'apple.com', 'microsoft.com')
+              'imgur.com', 'streamable.com', 'redditmedia', 'redditstatic', 'apple.com', 'microsoft.com',
+              'feedburner.com', 'betabound.com', 'betalist.com', 'paster.sh', 'dpaste.com', 'ibb.co', 'pepper.pl',
+              'mydealz.de', 'hotukdeals.com', 'dealabs.com', 'pepper.it', 'preisjaeger.at', 'promodescuentos.com.mx',
+              'hn.algolia.com', 'news.ycombinator.com', 'producthunt.com', 'crunchbase.com')
 
 def db():
     c = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'radar.db'), timeout=30)
